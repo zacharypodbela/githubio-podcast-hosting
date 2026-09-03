@@ -61,6 +61,29 @@ def sanitize_title(filename):
     return name.replace("_", " ").replace("-", " ").strip().title()
 
 
+def parse_published_at(value):
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except (AttributeError, ValueError) as exc:
+            raise argparse.ArgumentTypeError(
+                "published timestamp must be a valid ISO 8601 value"
+            ) from exc
+
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise argparse.ArgumentTypeError(
+            "published timestamp must include a timezone (for example, Z or +00:00)"
+        )
+
+    return parsed.astimezone(timezone.utc)
+
+
+def format_published_at(value):
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def is_valid_feed_key(feed_key):
     return bool(feed_key) and all(
         char.islower() or char.isdigit() or char == "-" for char in feed_key
@@ -151,6 +174,7 @@ def create_base_feed(show_id, show_meta):
 def episode_metadata(episode_dir, audio_path):
     title = sanitize_title(audio_path.name)
     description = "No description provided."
+    published_at = None
     metadata_path = episode_dir / "episode.yml"
 
     if metadata_path.exists():
@@ -159,10 +183,24 @@ def episode_metadata(episode_dir, audio_path):
                 metadata = yaml.safe_load(f) or {}
             title = metadata.get("title") or title
             description = metadata.get("description") or description
+            published_at = metadata.get("published_at")
         except yaml.YAMLError as exc:
             print(f"Warning: Could not parse {metadata_path}: {exc}", file=sys.stderr)
 
-    return title, description
+    return title, description, published_at
+
+
+def resolve_publication_datetime(published_at, audio_path, metadata_path):
+    if published_at:
+        try:
+            return parse_published_at(published_at)
+        except argparse.ArgumentTypeError:
+            print(
+                f"Warning: Invalid published_at in {metadata_path}; using audio mtime.",
+                file=sys.stderr,
+            )
+
+    return datetime.fromtimestamp(audio_path.stat().st_mtime, tz=timezone.utc)
 
 
 def build_all_feeds():
@@ -186,6 +224,7 @@ def build_all_feeds():
             print(f"Warning: Feed '{show_key}' is missing feed_id. Skipping.")
             continue
 
+        episodes = []
         for episode_path in episode_paths:
             episode_dir = Path(episode_path)
             if not episode_dir.exists():
@@ -197,10 +236,20 @@ def build_all_feeds():
                 print(f"Warning: No audio file found in {episode_dir}. Skipping.")
                 continue
 
-            title, description = episode_metadata(episode_dir, audio_path)
+            title, description, published_at = episode_metadata(episode_dir, audio_path)
+            publication_datetime = resolve_publication_datetime(
+                published_at, audio_path, episode_dir / "episode.yml"
+            )
+            episodes.append(
+                (publication_datetime, audio_path, title, description)
+            )
+
+        for publication_datetime, audio_path, title, description in sorted(
+            episodes, key=lambda episode: episode[0], reverse=True
+        ):
             file_size = audio_path.stat().st_size
             pub_date = format_datetime(
-                datetime.fromtimestamp(audio_path.stat().st_mtime, tz=timezone.utc),
+                publication_datetime,
                 usegmt=True,
             )
             file_url = f"{BASE_URL}/{public_url_path(audio_path)}"
@@ -304,13 +353,16 @@ def cmd_add_episode(args):
     destination = episode_dir / f"audio{audio_path.suffix.lower()}"
     shutil.copy2(audio_path, destination)
 
+    published_at = args.published_at or datetime.now(timezone.utc)
+    episode = {"published_at": format_published_at(published_at)}
     if args.title or args.description:
         episode = {
             "title": args.title or sanitize_title(audio_path.name),
             "description": args.description or "No description provided.",
+            **episode,
         }
-        with (episode_dir / "episode.yml").open("w", encoding="utf-8") as f:
-            yaml.safe_dump(episode, f, default_flow_style=False, sort_keys=False)
+    with (episode_dir / "episode.yml").open("w", encoding="utf-8") as f:
+        yaml.safe_dump(episode, f, default_flow_style=False, sort_keys=False)
 
     config[args.feed].setdefault("episodes", []).append(episode_dir.as_posix())
     save_master_config(config)
@@ -359,6 +411,11 @@ def main():
     p_add.add_argument("--feed", type=str, required=True, help="Target feed key")
     p_add.add_argument("--title", type=str, help="Episode title")
     p_add.add_argument("--description", type=str, help="Episode description")
+    p_add.add_argument(
+        "--published-at",
+        type=parse_published_at,
+        help="Publication timestamp in ISO 8601 format with a timezone",
+    )
 
     p_cross = subparsers.add_parser(
         "cross_post", help="Link an existing episode to another feed"

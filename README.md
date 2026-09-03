@@ -77,7 +77,11 @@ python3 manage_podcast.py create_feed my-podcast --title "My Podcast" --descript
 python3 manage_podcast.py add_episode ~/Desktop/interview.mp3 --feed my-podcast --title "First Episode" --description "A short intro episode."
 ```
 
-If title and description are omitted they will be generated based on the audio file name.
+If title and description are omitted they will be generated based on the audio file name. Episodes default to the current UTC publication time. For imports or backfills, set an explicit timezone-aware ISO 8601 timestamp with `--published-at`:
+
+```bash
+python3 manage_podcast.py add_episode ~/Desktop/interview.mp3 --feed my-podcast --published-at "2026-08-30T17:00:00-07:00"
+```
 
 **Cross-post an existing episode into an another feed:**
 
